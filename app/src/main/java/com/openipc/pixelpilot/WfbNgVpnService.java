@@ -73,7 +73,7 @@ public class WfbNgVpnService extends VpnService {
         builder.addAddress("10.5.0.3", 24);
 
         // Route only 10.5.0.0/24 through this interface
-        builder.addRoute("10.5.0.0", 24);
+//        builder.addRoute("10.5.0.0", 24);
 
 
         // You can optionally set DNS servers if needed

@@ -69,7 +69,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         WfbngLink.cpp
         TxFrame.h
         TxFrame.cpp
-        WfbngLink.cpp
+        SignalQualityCalculator.h
+        SignalQualityCalculator.cpp
         )
 
 target_link_libraries(${CMAKE_PROJECT_NAME}

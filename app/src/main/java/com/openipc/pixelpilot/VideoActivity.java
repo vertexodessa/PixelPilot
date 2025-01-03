@@ -808,6 +808,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         } else {
             Intent serviceIntent = new Intent(this, WfbNgVpnService.class);
             startService(serviceIntent);
+
+            Intent serviceIntent1 = new Intent(this, UsbSerialService.class);
+            startService(serviceIntent1);
         }
 
     }

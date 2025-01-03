@@ -14,6 +14,7 @@
 #include <android/asset_manager_jni.h>
 
 #include "RxFrame.h"
+#include "SignalQualityCalculator.h"
 #include "TxFrame.h"
 #include "libusb.h"
 #include "wfb-ng/src/wifibroadcast.hpp"
@@ -136,7 +137,7 @@ int WfbngLink::run(JNIEnv* env, jobject context, jint wifiChannel, jint fd)
             std::lock_guard<std::mutex> lock(agg_mutex);
             if (frame.MatchesChannelID(video_channel_id_be8))
             {
-                rssi_calculator.add_rssi(packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]);
+                SignalQualityCalculator::get_instance().add_rssi(packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]);
                 video_aggregator->process_packet(packet.Data.data() + sizeof(ieee80211_header),
                                                  packet.Data.size() - sizeof(ieee80211_header) - 4,
                                                  0,
@@ -180,7 +181,7 @@ int WfbngLink::run(JNIEnv* env, jobject context, jint wifiChannel, jint fd)
             {
                 std::stringstream ss;
                 frame.printChannelId(ss);
-                __android_log_print(ANDROID_LOG_WARN, TAG, "Received unknown packet, channel ID: %d", ss.str().c_str());
+                __android_log_print(ANDROID_LOG_WARN, TAG, "Received unknown packet, channel ID: %s", ss.str().c_str());
             }
         };
 
@@ -265,16 +266,13 @@ int WfbngLink::run(JNIEnv* env, jobject context, jint wifiChannel, jint fd)
                     // Send message repeatedly every 0.1 seconds
                     while (true)
                     {
-                        float avg_rssi = rssi_calculator.get_avg_rssi();
-                        auto mapRange =
-                            [](double value, double inputMin, double inputMax, double outputMin, double outputMax)
-                        { return outputMin + ((value - inputMin) * (outputMax - outputMin) / (inputMax - inputMin)); };
+                        int quality = SignalQualityCalculator::get_instance().calculate_signal_quality();
 
-                        // 30...90 maps to 1000..2000:
-                        int quality = mapRange(avg_rssi, 30, 90, 1000, 2000);
+                    // 30...90 maps to 1000..2000:
+                    // int quality = mapRange(avg_rssi, 30, 90, 1000, 2000);
 
 #if defined(ANDROID_DEBUG_RSSI) || true
-                        __android_log_print(ANDROID_LOG_WARN, TAG, "avg_rssi %f, quality %d", avg_rssi, quality);
+                        __android_log_print(ANDROID_LOG_WARN, TAG, "quality %d", quality);
 #endif
 
                         char message[100]; // = "10000000:2000:2000:5:10:-70:25:23:20\n";
@@ -289,12 +287,13 @@ int WfbngLink::run(JNIEnv* env, jobject context, jint wifiChannel, jint fd)
 
                         snprintf(message,
                                  sizeof(message),
-                                 "10000000:%d:%d:%d:%d:%d:25:23:20\n",
+                                 "10000000:%d:%d:%d:%d:25:25:23:20\n",
                                  quality,
                                  quality,
                                  p_recovered,
-                                 p_lost,
-                                 (int)avg_rssi);
+                                 p_lost);
+
+                        break;
 
                         ssize_t sent = sendto(
                             sockfd, message, strlen(message), 0, (struct sockaddr*)&server_addr, sizeof(server_addr));
@@ -304,7 +303,7 @@ int WfbngLink::run(JNIEnv* env, jobject context, jint wifiChannel, jint fd)
                             break;
                         }
                         __android_log_print(ANDROID_LOG_DEBUG, TAG, "Sent %lu bytes", sent);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     }
 
                     close(sockfd);
@@ -417,6 +416,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_openipc_wfbngrtl8812_WfbNgLink_native
     native(wfbngLinkN)->run(env, androidContext, wifiChannel, fd);
 }
 
+extern "C" JNIEXPORT jint JNICALL Java_com_openipc_pixelpilot_UsbSerialService_nativeGetSignalQuality(JNIEnv* env,
+                                                                                                      jclass clazz)
+{
+        return SignalQualityCalculator::get_instance().calculate_signal_quality();
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_openipc_wfbngrtl8812_WfbNgLink_nativeStop(
     JNIEnv* env, jclass clazz, jlong wfbngLinkN, jobject androidContext, jint fd)
 {
@@ -445,6 +450,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_openipc_wfbngrtl8812_WfbNgLink_native
     {
         return;
     }
+
+    SignalQualityCalculator::get_instance().add_fec_data(aggregator->count_p_fec_recovered, aggregator->count_p_lost);
+
     auto stats = env->NewObject(jcStats,
                                 jcStatsConstructor,
                                 (jint)aggregator->count_p_all,
@@ -474,43 +482,4 @@ extern "C" JNIEXPORT void JNICALL Java_com_openipc_wfbngrtl8812_WfbNgLink_native
                                                                                            jlong wfbngLinkN)
 {
     native(wfbngLinkN)->initAgg();
-}
-
-float RssiCalculator::get_avg_rssi()
-{
-    std::lock_guard<std::mutex> lock(rssis_mutex);
-
-    float avg_rssi1 = 0;
-    float avg_rssi2 = 0;
-    int count = rssis.size();
-
-    if (count > 0)
-    {
-        for (auto& rssi : rssis)
-        {
-            avg_rssi1 += rssi.first;
-            avg_rssi2 += rssi.second;
-        }
-
-        avg_rssi1 /= count;
-        avg_rssi2 /= count;
-    }
-    else
-    {
-        avg_rssi1 = avg_rssi2 = 0;
-    }
-
-    rssis.resize(0);
-
-    float avg_rssi = std::max(avg_rssi1, avg_rssi2);
-
-    rssis.resize(0);
-    return avg_rssi;
-}
-void RssiCalculator::add_rssi(uint8_t ant1, uint8_t ant2)
-{
-    // __android_log_print(ANDROID_LOG_WARN, TAG, "rssi1 %d, rssi2 %d", (int)ant1,
-    // (int)ant2);
-    std::lock_guard<std::mutex> lock(rssis_mutex);
-    rssis.push_back({ant1, ant2});
 }
